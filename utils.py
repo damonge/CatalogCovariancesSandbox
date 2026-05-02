@@ -279,7 +279,7 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None):
         None. Ignored unless type is "num" or "mom".
     msk: array
         Field mask, either in healpix or CAR. Needs corresponding randoms to
-        be None. Ignored unless type is "num" or "mom".
+        be None. Ignored if type is "cat".
 
     Returns:
     fld: NmtField

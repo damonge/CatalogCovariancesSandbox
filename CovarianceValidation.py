@@ -26,7 +26,7 @@ nhope = 100000
 nran_factor = 20
 lmax = 3*nside-1
 ls = np.arange(lmax+1)
-types = ["num", "num", "num", "num"]  # Types of the four fields
+types = ["cat", "cat", "cat", "cat"]  # Types of the four fields
 spins = [0, 0, 0, 0]  # Spins of the four fields
 random_seeds = [0, 0, 0, 0]  # Do the four fields share the same mask?
 
@@ -57,7 +57,7 @@ data = [{"cat": (pos[0], alm[0])},
 #                                         pl_index=1.2,
 #                                         std_offset=5,
 #                                         pl_index_v=2.2,
-#                                         is_clustering=True,
+#                                         is_clustering=("mom" not in types),
 #                                         overwrite=overwrite)
 # alm_od = hp.synalm(cl_od)
 # vlm = [ut.gen_alms(cl_v, 100, spin=sp) for sp in spins]
