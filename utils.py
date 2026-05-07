@@ -122,8 +122,8 @@ def _evaluate_product_cl(lmax, cls_cc, cls_bb, plot_dir, overwrite=True):
     w3j = np.zeros_like(ells_w3j, dtype=float)
     big_w3j = np.zeros((lmax+1, lmax+1, lmax+1))
     for ell1 in ells_w3j[1:]:
-        if ell1 % 100 == 0:
-            print(" ", ell1)
+        # if ell1 % 100 == 0:
+        #     print(" ", ell1)
         for ell2 in ells_w3j[1:]:
             w3j_array, ellmin, ellmax = Wigner3j(ell1, ell2, 0, 0, 0)
             w3j_array = w3j_array[:ellmax - ellmin + 1]
@@ -166,8 +166,8 @@ def get_momentum_cl(lmax, out_dir, pl_index=2, std_offset=5, pl_index_v=3,
     ls = np.arange(lmax+1)
     clg = 1/(10+ls)**pl_index  # Gaussian spectrum (unnormalized)
     norm = 4*np.pi/std_offset**2/np.sum((2*ls+1)*clg)
-    print('norm for overdensity cl', norm)
-    print("std (cl)", 1./std_offset)
+    # print('norm for overdensity cl', norm)
+    # print("std (cl)", 1./std_offset)
     cl_od = norm*clg  # overdensity spectrum
     if is_clustering:
         return cl_od, cl_od, None
@@ -191,7 +191,7 @@ def get_bins_from_lmax_log(lmax):
     return nmt.NmtBin.from_edges(ell_ini, ell_end)
 
 
-def _get_catalog_field(positions, alm, lmax, spin=0):
+def _get_catalog_field(positions, alm, lmax, spin=0, beam=None):
     """ Generates a NaMaster Catalog field from an alm,
     which we sample at the positions of the sources in cat.
     """
@@ -201,12 +201,12 @@ def _get_catalog_field(positions, alm, lmax, spin=0):
         fs = nmt.utils._alm2catalog_ducc0(alm, positions,
                                           spin=spin, lmax=lmax)
     len = np.array(positions).shape[-1]
-    f = nmt.NmtFieldCatalog(positions, np.ones(len),
-                            fs, lmax, spin=spin, retain_catalog=True)
+    f = nmt.NmtFieldCatalog(positions, np.ones(len), fs, lmax, spin=spin,
+                            retain_catalog=True, beam=beam)
     return f
 
 
-def _get_map_field(mask, map, alm, lmax, spin=0):
+def _get_map_field(mask, map, alm, lmax, spin=0, beam=None):
     """ Generates a NaMaster field from a map or alm given a mask.
     """
     if map is None and alm is not None:
@@ -225,11 +225,11 @@ def _get_map_field(mask, map, alm, lmax, spin=0):
     if spin == 0:
         map = [map]
 
-    return nmt.NmtField(mask, map, lmax=lmax, spin=spin)
+    return nmt.NmtField(mask, map, lmax=lmax, spin=spin, beam=beam)
 
 
 def _get_momentum_field(positions, lmax, valm=None, mask=None,
-                        positions_rand=None, spin=0):
+                        positions_rand=None, beam=None, spin=0):
     """ Generates a NaMaster Catalog Momentum field from a catalog and a mask
     or a random catalog. If valm is not provided, this makes a Catalog
     Clustering field.
@@ -245,18 +245,18 @@ def _get_momentum_field(positions, lmax, valm=None, mask=None,
     if valm is None:
         f = nmt.NmtFieldCatalogClustering(
             positions, weights, positions_rand, weights_rand, lmax, mask=mask,
-            retain_catalog=True)
+            retain_catalog=True, beam=beam)
     else:
         fs = nmt.utils._alm2catalog_ducc0(valm, positions,
                                           spin=spin, lmax=lmax)
         f = nmt.NmtFieldCatalogMomentum(positions, weights, fs,
                                         positions_rand, weights_rand, lmax,
                                         mask=mask, spin=spin,
-                                        retain_catalog=True)
+                                        retain_catalog=True, beam=beam)
     return f
 
 
-def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None):
+def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None, beam=None):
     """
     Parameters:
     lmax: int
@@ -280,6 +280,7 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None):
     msk: array
         Field mask, either in healpix or CAR. Needs corresponding randoms to
         be None. Ignored if type is "cat".
+    beam: TODO
 
     Returns:
     fld: NmtField
@@ -298,7 +299,7 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None):
             spin = 2
         else:
             raise ValueError("field alms have wrong shape.") 
-        return _get_catalog_field(pos, flm, lmax, spin=spin)
+        return _get_catalog_field(pos, flm, lmax, spin=spin, beam=beam)
     elif typ == "map":
         map = np.array(map)
         if map is None:
@@ -319,7 +320,7 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None):
                 spin = 2
             else:
                 raise ValueError("Map has wrong shape.")
-        return _get_map_field(msk, map, None, lmax, spin=spin)
+        return _get_map_field(msk, map, None, lmax, spin=spin, beam=beam)
     elif typ in ["num", "mom"]:
         if cat is None:
             raise ValueError("Catalog must be provided.")
@@ -342,7 +343,8 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None):
             else:
                 raise ValueError("field alms have wrong shape.") 
         return _get_momentum_field(pos, lmax, valm=flm, mask=msk,
-                                   positions_rand=pos_rand, spin=spin)
+                                   positions_rand=pos_rand, spin=spin,
+                                   beam=beam)
     else:
         raise ValueError("Typ must be 'map', 'cat', 'mom', or 'num'")
 
