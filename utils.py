@@ -77,6 +77,18 @@ def gen_maps(cl, seed, nside, spin=0):
     return np.array([map1, map2])
 
 
+def alm2map(alm, nside):
+    """
+    """
+    alm = np.array(alm)
+    if alm.ndim == 1 or alm.shape[0] == 1:
+        return hp.alm2map(alm, nside)
+    elif alm.ndim == 2 and alm.shape[0] == 2:
+        return hp.alm2map_spin(alm, nside, 2)
+    else:
+        raise ValueError(f"alm has wrong input shapr ({alm.shape})")
+
+
 def gen_cl_guess(cl0, spin1=0, spin2=0):
     """
     """
@@ -171,7 +183,7 @@ def get_momentum_cl(lmax, out_dir, pl_index=2, std_offset=5, pl_index_v=3,
     # print('norm for overdensity cl', norm)
     # print("std (cl)", 1./std_offset)
     cl_od = norm*clg  # overdensity spectrum
-    cl_od_pw = cl_od
+    cl_od_pw = cl_od.copy()
     if pixwin is not None:
         cl_od_pw *= pixwin**2
     if is_clustering:    
