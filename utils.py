@@ -196,36 +196,111 @@ def get_momentum_cl(lmax, out_dir, pl_index=2, std_offset=5, pl_index_v=3,
     return cl_th, cl_od, cl_v, cl_th_pw, cl_od_pw
 
 
-def get_bins_from_lmax_log(lmax):
+def get_bins_from_lmax_log(lmax, n=20, lmin=2):
     """
+    Split the inclusive integer range [lmin, lmax] into log-scale integer bins.
+
+    Returns
+    -------
+    bin_mins : np.ndarray
+        Inclusive lower edge of each bin.
+    bin_maxs : np.ndarray
+        Inclusive upper edge of each bin.
+
+    Guarantees
+    ----------
+    - Every integer from lmin to lmax is covered.
+    - Bins are contiguous and non-overlapping.
+    - No returned bin has bin_min == bin_max.
+    - Therefore, if possible, each bin contains at least one integer.
+
+    Notes
+    -----
+    - Supports lmin = 0 by using log(x + 1).
+    - If the range has fewer than 2 integers, this guarantee is impossible.
+    - The returned number of bins may be less than n.
     """
-    ell_ini = np.array(
-        [i for i in range(2, 10)] +
-        [int(10**(n/5.)) for n in range(5, int(5*np.log10(lmax))+1)]
-    )
-    ell_end = np.array(
-        [1+i for i in range(2, 10)] +
-        [int(10**(n/5.)) for n in range(6, int(5*np.log10(lmax))+1)] + [lmax + 1]
-    )
-    return nmt.NmtBin.from_edges(ell_ini, ell_end)
+    lmax += 1  # To ensure that lmax is included.
+    if n <= 0:
+        raise ValueError("n must be positive")
+    if lmin < 0:
+        raise ValueError("lmin must be >= 0")
+    if lmax < lmin:
+        raise ValueError("lmax must be >= lmin")
+
+    num_values = lmax - lmin + 1
+
+    if num_values < 2:
+        raise ValueError(
+            "Cannot create bins with bin_min != bin_max when "
+            "the range contains fewer than 2 integers"
+        )
+
+    # Need at least two integers per bin if bin_min != bin_max.
+    n = min(n, num_values // 2)
+
+    # Work in shifted coordinates so zero is allowed.
+    lo = lmin + 1
+    hi = lmax + 2  # exclusive upper edge, shifted by +1
+
+    raw_edges = np.logspace(np.log10(lo), np.log10(hi), n + 1)
+
+    # Convert back from shifted coordinates.
+    edges = np.floor(raw_edges).astype(int) - 1
+
+    # Enforce exact inclusive/exclusive endpoints.
+    edges[0] = lmin
+    edges[-1] = lmax + 1
+
+    # Make edges strictly increasing.
+    edges = np.maximum.accumulate(edges)
+
+    # Enforce minimum bin width of 2 integers:
+    # edge[i + 1] - edge[i] >= 2
+    for i in range(1, len(edges)):
+        min_allowed = edges[i - 1] + 2
+        if edges[i] < min_allowed:
+            edges[i] = min_allowed
+
+    # If the forward pass pushed edges beyond the final endpoint,
+    # repair from the right.
+    edges[-1] = lmax + 1
+    for i in range(len(edges) - 2, -1, -1):
+        max_allowed = edges[i + 1] - 2
+        if edges[i] > max_allowed:
+            edges[i] = max_allowed
+
+    # Re-enforce exact first endpoint.
+    edges[0] = lmin
+
+    bin_mins = edges[:-1]
+    bin_maxs = edges[1:] - 1
+
+    return nmt.NmtBin.from_edges(bin_mins, bin_maxs)
 
 
-def _get_catalog_field(positions, alm, lmax, spin=0):
+def _get_catalog_field(positions, alm, lmax, spin=0, sigma=None, seed=None,
+                       lmax_mask=None):
     """ Generates a NaMaster Catalog field from an alm,
     which we sample at the positions of the sources in cat.
     """
-    if alm is None:
+    if seed is not None:
+        np.random.seed(seed)
+    if alm is None and sigma is None:
         fs = None
-    else:
+    elif alm is not None:
         fs = nmt.utils._alm2catalog_ducc0(alm, positions,
                                           spin=spin, lmax=lmax)
+        if sigma is not None:
+            fs += np.random.normal(np.zeros_like(fs),
+                                   np.full(fs.shape, sigma))
     len = np.array(positions).shape[-1]
     f = nmt.NmtFieldCatalog(positions, np.ones(len), fs, lmax, spin=spin,
-                            retain_catalog=True)
+                            retain_catalog=True, lmax_mask=lmax_mask)
     return f
 
 
-def _get_map_field(mask, map, alm, lmax, spin=0):
+def _get_map_field(mask, map, alm, lmax, spin=0, lmax_mask=None):
     """ Generates a NaMaster field from a map or alm given a mask.
     """
     if map is None and alm is not None:
@@ -244,38 +319,46 @@ def _get_map_field(mask, map, alm, lmax, spin=0):
     if spin == 0:
         map = [map]
 
-    return nmt.NmtField(mask, map, lmax=lmax, spin=spin)
+    return nmt.NmtField(mask, map, lmax=lmax, spin=spin, lmax_mask=lmax_mask)
 
 
 def _get_momentum_field(positions, lmax, valm=None, mask=None,
-                        positions_rand=None, spin=0):
+                        positions_rand=None, spin=0, sigma=None, seed=None,
+                        lmax_mask=None):
     """ Generates a NaMaster Catalog Momentum field from a catalog and a mask
     or a random catalog. If valm is not provided, this makes a Catalog
     Clustering field.
     """
     if mask is None and positions_rand is None:
         raise ValueError("Must provide mask or randoms.")
+    if seed is not None:
+        np.random.seed(seed)
     len = np.array(positions).shape[-1]
     weights = np.ones(len)
     weights_rand = None
     if positions_rand is not None:
         len_rand = np.array(positions_rand).shape[-1]
         weights_rand = np.ones(len_rand)
-    if valm is None:
+    if valm is None and sigma is None:
         f = nmt.NmtFieldCatalogClustering(
             positions, weights, positions_rand, weights_rand, lmax, mask=mask,
-            retain_catalog=True)
-    else:
+            retain_catalog=True, lmax_mask=lmax_mask)
+    elif valm is not None:
         fs = nmt.utils._alm2catalog_ducc0(valm, positions,
                                           spin=spin, lmax=lmax)
+        if sigma is not None:
+            fs += np.random.normal(np.zeros_like(fs),
+                                   np.full(fs.shape, sigma))
         f = nmt.NmtFieldCatalogMomentum(positions, weights, fs,
                                         positions_rand, weights_rand, lmax,
                                         mask=mask, spin=spin,
-                                        retain_catalog=True)
+                                        retain_catalog=True,
+                                        lmax_mask=lmax_mask)
     return f
 
 
-def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None):
+def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None, seed=None,
+              lmax_mask=None):
     """
     Parameters:
     lmax: int
@@ -288,17 +371,24 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None):
         Field mask, either in healpix or CAR. Needs corresponding randoms to
         be None. Assumed to have spin 0 if shape is [...] and spin 2
         if shape is [2, ...]. Ignored unless type is "map"
-    cat: tuple of arrays (pos, flm)
-        Tuple containing arrays of source catalog positions and alms of the
-        sampled field. flm are assumed to have spin 0 if ndim is 1 and spin 2
+    cat: tuple of arrays (pos, flm, sigma)
+        Tuple containing arrays of source catalog positions, alms of the
+        sampled field, and (optional) standard deviation of sampled field.
+        flm are assumed to have spin 0 if ndim is 1 and spin 2
         if shape is [2, :]. Ignored if type is "map".
-        flm is ignored if field type is "num".
+        flm is ignored if field type is "num". sigma is ignored if None, or
+        if type is "map" or "num".
     ran: array
         Array containing the random positions. Needs corresponding masks to be
         None. Ignored unless type is "num" or "mom".
     msk: array
         Field mask, either in healpix or CAR. Needs corresponding randoms to
         be None. Ignored if type is "cat".
+    seed: int
+        Random seed for sampling tracer-level noise. Ignored if None, and if
+        type is "map" or "num.
+    lmax_mask: int
+        lmax considered for mode coupling matrix calculations
 
     Returns:
     fld: NmtField
@@ -309,7 +399,7 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None):
     if typ == "cat":
         if cat == "None":
             raise ValueError("Catalog must be provided.")
-        pos, flm = cat
+        pos, flm, sigma = cat
         flm = np.array(flm)
         if flm.ndim == 1 or (flm.ndim == 2 and flm.shape[0] == 1):
             spin = 0
@@ -317,7 +407,8 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None):
             spin = 2
         else:
             raise ValueError("field alms have wrong shape.") 
-        return _get_catalog_field(pos, flm, lmax, spin=spin)
+        return _get_catalog_field(pos, flm, lmax, spin=spin, sigma=sigma,
+                                  seed=seed, lmax_mask=lmax_mask)
     elif typ == "map":
         map = np.array(map)
         if map is None:
@@ -338,7 +429,8 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None):
                 spin = 2
             else:
                 raise ValueError("Map has wrong shape.")
-        return _get_map_field(msk, map, None, lmax, spin=spin)
+        return _get_map_field(msk, map, None, lmax, spin=spin,
+                              lmax_mask=lmax_mask)
     elif typ in ["num", "mom"]:
         if cat is None:
             raise ValueError("Catalog must be provided.")
@@ -361,7 +453,9 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None):
             else:
                 raise ValueError("field alms have wrong shape.") 
         return _get_momentum_field(pos, lmax, valm=flm, mask=msk,
-                                   positions_rand=pos_rand, spin=spin)
+                                   positions_rand=pos_rand, spin=spin,
+                                   sigma=sigma, seed=seed,
+                                   lmax_mask=lmax_mask)
     else:
         raise ValueError("Typ must be 'map', 'cat', 'mom', or 'num'")
 

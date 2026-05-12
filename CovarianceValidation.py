@@ -10,14 +10,15 @@ import utils as ut
 from scipy.stats import chi2
 import mpi_utils as mpi
 from itertools import product
+from astropy.io import fits
 
 # # General arguments
-nsims = 10000
+nsims = 1000
 overwrite = True  # Overwrite previously saved products
 only_sims = False  # Only compute sim CLs (the heavily parallelized part)
 
 # NOTE: Choose a meaningful label to identify the validation case
-case = "clustering_randoms_alldiff"
+case = "catalog_spin0_ChimeCl_nhope4000"
 # plot_dir = f"/shared_home/kwolz/bbdev/catalog_pcl/plots/{case}"
 plot_dir = f"/global/homes/k/kwolz/CatalogCovariancesSandbox/plots/{case}"
 out_dir = "/global/homes/k/kwolz/CatalogCovariancesSandbox/out"
@@ -33,13 +34,13 @@ msk = hp.ud_grade(hp.read_map(fname_mask), nside_out=nside)
 msk /= np.amax(msk)
 # msk = np.ones(hp.nside2npix(nside))
 
-nhope = 250000
+nhope = 4000
 nran_factor = 20
 lmax = 3*nside-1
 ls = np.arange(lmax+1)
-types = ["num", "num", "num", "num"]  # Types of the four fields
+types = ["cat", "cat", "cat", "cat"]  # Types of the four fields
 spins = [0, 0, 0, 0]  # Spins of the four fields
-random_seeds = [0, 1, 2, 3]  # Do the four fields share the same sources and randoms?
+random_seeds = [0, 0, 0, 0]  # Do the four fields share the same sources and randoms?
 with open(f"{plot_dir}/log.txt", "w") as f:
   f.write(f"nside {nside}\n nhope {nhope}\n nran_factor {nran_factor}\n"
           f"types {types}\n spins {spins}\n random_seeds {random_seeds}")
@@ -47,15 +48,31 @@ with open(f"{plot_dir}/log.txt", "w") as f:
 rank, size, comm = mpi.init(switch=True)
 mpi.print_rnk0("Generating mock data fields", rank)
 
-# # NOTE: Comment the irrelevant cases below
-# # For catalog fields
+# NOTE: Comment the irrelevant cases below
+
+# For CHIME-like mock data
+chime_fn = "/global/homes/k/kwolz/CatalogCovariancesSandbox/data/chime_catalogue_nside4096_noise.fits"
+dm = {}
+with fits.open(chime_fn) as hdul:
+    table_hdu = hdul[1]  # Often the first table is extension 1
+    data = hdul[1].data
+    # ra, dec = [ np.asarray(data[k], dtype=np.float64) for k in ["RA", "DEC"]]
+    cl_th = np.asarray(hdul[2].data["cell"], dtype=np.float64)[:lmax+1]
+pos = [ut.get_catalog(nhope, msk, 1000+r) for r in random_seeds]
+alm = [ut.gen_alms(cl_th, 100, spin=sp) for sp in spins]
+data = [{"cat": (pos[0], alm[0], None)},
+         {"cat": (pos[1], alm[1], None)},
+         {"cat": (pos[2], alm[2], None)},
+         {"cat": (pos[3], alm[3], None)}]
+
+# # For generic catalog fields
 # pos = [ut.get_catalog(nhope, msk, 1000+r) for r in random_seeds]
 # cl_th = 1./(10+ls)**0.7
 # alm = [ut.gen_alms(cl_th, 100, spin=sp) for sp in spins]
-# data = [{"cat": (pos[0], alm[0])},
-#          {"cat": (pos[1], alm[1])},
-#          {"cat": (pos[2], alm[2])},
-#          {"cat": (pos[3], alm[3])}]
+# data = [{"cat": (pos[0], alm[0], None)},
+#          {"cat": (pos[1], alm[1], None)},
+#          {"cat": (pos[2], alm[2], None)},
+#          {"cat": (pos[3], alm[3], None)}]
 
 # # For map fields
 # cl_th = 1./(10+ls)**0.7
@@ -75,21 +92,21 @@ mpi.print_rnk0("Generating mock data fields", rank)
 #         {"cat": (pos[2], alm[2])},
 #         {"map": map[3], "msk": msk}]
 
-# For clustering or momentum fields
-pixwin = hp.pixwin(nside, lmax=lmax)
-cl_th_nopw, cl_od_nopw, cl_v, cl_th, cl_od = ut.get_momentum_cl(
-    lmax, plot_dir, pl_index=1.2, std_offset=5, pl_index_v=2.2,
-    is_clustering=("mom" not in types), overwrite=True, pixwin=pixwin
-)
-alm_od = hp.synalm(cl_od_nopw)
-vlm = [ut.gen_alms(cl_v, 100, spin=sp) for sp in spins]
-odmap = hp.alm2map(alm_od, nside)
-posNum = [ut.get_catalog(nhope, (1 + odmap)*msk, 100+r) for r in random_seeds]
-posRan = [ut.get_catalog(nhope*nran_factor, msk, 200+r) for r in random_seeds]
-data = [{"cat": (posNum[0], vlm[0]), "msk": None, "ran": posRan[0]},
-        {"cat": (posNum[1], vlm[1]), "msk": None, "ran": posRan[1]},
-        {"cat": (posNum[2], vlm[2]), "msk": None, "ran": posRan[2]},
-        {"cat": (posNum[3], vlm[3]), "msk": None, "ran": posRan[3]}]
+# # For clustering or momentum fields
+# pixwin = hp.pixwin(nside, lmax=lmax)
+# cl_th_nopw, cl_od_nopw, cl_v, cl_th, cl_od = ut.get_momentum_cl(
+#     lmax, plot_dir, pl_index=1.2, std_offset=5, pl_index_v=2.2,
+#     is_clustering=("mom" not in types), overwrite=True, pixwin=pixwin
+# )
+# alm_od = hp.synalm(cl_od_nopw)
+# vlm = [ut.gen_alms(cl_v, 100, spin=sp) for sp in spins]
+# odmap = hp.alm2map(alm_od, nside)
+# posNum = [ut.get_catalog(nhope, (1 + odmap)*msk, 100+r) for r in random_seeds]
+# posRan = [ut.get_catalog(nhope*nran_factor, msk, 200+r) for r in random_seeds]
+# data = [{"cat": (posNum[0], vlm[0]), "msk": None, "ran": posRan[0]},
+#         {"cat": (posNum[1], vlm[1]), "msk": None, "ran": posRan[1]},
+#         {"cat": (posNum[2], vlm[2]), "msk": None, "ran": posRan[2]},
+#         {"cat": (posNum[3], vlm[3]), "msk": None, "ran": posRan[3]}]
 
 # # For clustering x catalog fields
 # pixwin = hp.pixwin(nside, lmax=lmax)
@@ -180,12 +197,12 @@ if not os.path.isfile(fname) or overwrite:
         print(i)
         # # NOTE: Comment the irrelevant cases in the same way as above.
 
-        # # For catalog fields
-        # alm = [ut.gen_alms(cl_th, 1000+i, spin=sp) for sp in spins]
-        # data = [{"cat": (pos[0], alm[0])},
-        #         {"cat": (pos[1], alm[1])},
-        #         {"cat": (pos[2], alm[2])},
-        #         {"cat": (pos[3], alm[3])}]
+        # For catalog fields
+        alm = [ut.gen_alms(cl_th, 1000+i, spin=sp) for sp in spins]
+        data = [{"cat": (pos[0], alm[0], None)},
+                {"cat": (pos[1], alm[1], None)},
+                {"cat": (pos[2], alm[2], None)},
+                {"cat": (pos[3], alm[3], None)}]
 
         # # For map fields
         # map = [ut.gen_maps(cl_th, 1000+i, nside, spin=sp) for sp in spins]
@@ -202,16 +219,16 @@ if not os.path.isfile(fname) or overwrite:
         #         {"cat": (pos[2], alm[2])},
         #         {"map": map[3], "msk": msk}]
 
-        # For clustering or momentum fields
-        alm_od = ut.gen_alms(cl_od_nopw, 1000+i)
-        vlm = [ut.gen_alms(cl_v, 2000+i, spin=sp) for sp in spins]
-        odmap = hp.alm2map(alm_od, nside)
-        posNum = [ut.get_catalog(nhope, (1 + odmap)*msk, 1000*i+r) for r in random_seeds]
-        posRan = [ut.get_catalog(nhope*nran_factor, msk, 2000*i+r) for r in random_seeds]
-        data = [{"cat": (posNum[0], vlm[0]), "msk": None, "ran": posRan[0]},
-                {"cat": (posNum[1], vlm[1]), "msk": None, "ran": posRan[1]},
-                {"cat": (posNum[2], vlm[2]), "msk": None, "ran": posRan[2]},
-                {"cat": (posNum[3], vlm[3]), "msk": None, "ran": posRan[3]}]
+        # # For clustering or momentum fields
+        # alm_od = ut.gen_alms(cl_od_nopw, 1000+i)
+        # vlm = [ut.gen_alms(cl_v, 2000+i, spin=sp) for sp in spins]
+        # odmap = hp.alm2map(alm_od, nside)
+        # posNum = [ut.get_catalog(nhope, (1 + odmap)*msk, 1000*i+r) for r in random_seeds]
+        # posRan = [ut.get_catalog(nhope*nran_factor, msk, 2000*i+r) for r in random_seeds]
+        # data = [{"cat": (posNum[0], vlm[0]), "msk": None, "ran": posRan[0]},
+        #         {"cat": (posNum[1], vlm[1]), "msk": None, "ran": posRan[1]},
+        #         {"cat": (posNum[2], vlm[2]), "msk": None, "ran": posRan[2]},
+        #         {"cat": (posNum[3], vlm[3]), "msk": None, "ran": posRan[3]}]
 
         # # For clustering x catalog fields
         # np.random.seed(1000+i)
