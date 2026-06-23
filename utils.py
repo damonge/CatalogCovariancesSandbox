@@ -2,10 +2,107 @@ import numpy as np
 import healpy as hp
 import pymaster as nmt
 import os
+import wget
 from collections import OrderedDict
+from astropy.io import fits
+import scipy.stats as stats
+import matplotlib.pyplot as plt
 
 
-def get_catalog(npoints, m, seed):
+def unique_non_nan_column_indices(a, return_complement=False):
+    """
+    Returns indices of a mxn-dimensional array such that the resulting array:
+    - does not contain any NaN values in any column
+    - does not contain any duplicate columns (it selects first occurence)
+    - preserves the original ordering
+    """
+    valid = ~np.isnan(a).any(axis=0)
+    _, idx = np.unique(a[:, valid], axis=1, return_index=True)
+    col_indices = np.where(valid)[0][idx]
+    keep = np.sort(col_indices)
+
+    if return_complement:
+        all_cols = np.arange(a.shape[1])
+        return np.setdiff1d(all_cols, keep)
+
+    return keep
+
+
+def load_CHIME_catalog(lmax):
+    """
+    Returns CHIME catalog positions, theory Cls (up to lmax),
+    and dispersion measure catalogs noiseless, with Gaussian noise,
+    and with lognormal noise, respectively.
+    """
+    chime_fn = "/global/homes/k/kwolz/CatalogCovariancesSandbox/data/chime_catalogue_nside4096_noise.fits"  # noqa: E501
+    with fits.open(chime_fn) as hdul:
+        data = hdul[1].data
+        ra, dec, dm, dm_gauss, dm_lognorm = [
+            np.asarray(data[k], dtype=np.float64)
+            for k in ["RA", "DEC", "DM", "DM_with_gaussian_noise",
+                      "DM_with_lognormal_noise"]]
+        cl_th = np.asarray(hdul[2].data["cell"], dtype=np.float64)[:lmax+1]
+    pos = np.array([np.deg2rad(90.-dec), np.deg2rad(ra)], dtype=np.float64)
+    msk = np.logical_and(~np.isnan(dec), ~np.isnan(ra), ~np.isnan(dm))
+    pos, dm, dm_gauss, dm_lognorm = pos[:, msk], dm[msk], dm_gauss[msk], dm_lognorm[msk]
+    pos, idx = np.unique(pos, axis=1, return_index=True)
+
+    return cl_th, pos, dm[idx], dm_gauss[idx], dm_lognorm[idx]
+
+
+def load_DES_catalog():
+    """
+    Returns positions, weights, and shear field values of the DES Y3 catalog
+    (maglim shear product) at redshift bin 3.
+    """
+    import sys
+    sys.path.insert(0, "/global/homes/k/kwolz/software/Cosmotheka")
+    from cosmotheka.mappers.mapper_DESY3wl import MapperDESY3wl
+    print("Loading DES catalog")
+    cat_fn = '/pscratch/sd/k/kwolz/Datasets/DES_Y3/catalogs/DESY3_indexcat_zbin3.h5'
+    if not os.path.isfile(cat_fn):
+        wget.download("http://desdr-server.ncsa.illinois.edu/despublic/y3a2_files/y3kp_cats/DESY3_indexcat.h5", out=cat_fn)  # noqa
+    # prod_fn = "/pscratch/sd/k/kwolz/Datasets/DES_Y3-data_products/2pt_NG_final_2ptunblind_02_26_21_wnz_maglim_covupdate.fits"
+    # if not os.path.isfile(prod_fn):
+    #     wget.download("http://desdr-server.ncsa.illinois.edu/despublic/y3a2_files/datavectors/2pt_NG_final_2ptunblind_02_26_21_wnz_maglim_covupdate.fits", out=prod_fn)  # noqa
+    config = {
+        "zbin": 3,
+        "mode": "shear",
+        "indexcat": '/mnt/extraspace/damonge/Datasets/DES_Y3/catalogs/DESY3_indexcat_zbin3.h5',
+        'file_nz': '/mnt/extraspace/damonge/Datasets/DES_Y3/data_products/2pt_NG_final_2ptunblind_02_26_21_wnz_maglim_covupdate.fits',
+        'nside': 4096,
+        'coords': 'C',
+        'bin_edges': [0, 30, 60, 90, 120, 150, 180, 210, 240, 272, 309, 351, 398, 452, 513, 582, 661, 750, 852, 967, 1098, 1247, 1416, 1608, 1826, 2073, 2354, 2673, 3035, 3446, 3914, 4444, 5047, 5731, 6508, 7390, 8392, 9529, 10821, 12288, 13947, 15830, 17967, 20393, 24576],
+    }
+    m = MapperDESY3wl(config)
+    weights = m.get_weights()
+    ra = m.get_positions()['ra']
+    dec = m.get_positions()['dec']
+    e1, e2 = m.get_ellips_unbiased()
+    pos = np.radians(np.array([90. - dec, ra])).astype(np.float64)
+    shear = np.array([-e1, e2]).astype(np.float64)
+
+    return pos, weights, shear
+
+
+def load_theory_cls(lmax, fname, ncol=2, has_pixwin=False, nside=None):
+    ls = np.loadtxt(fname, usecols=0)
+    cls = []
+    for icol in range(1, ncol):
+        cls_append = np.loadtxt(fname, dtype=np.float64, usecols=icol)
+        cls.append(np.concatenate(([0.]*int(ls[0]), cls_append)))
+    cls = np.array(cls).flatten()[:lmax+1] if ncol == 2 else np.array(cls)[:lmax+1]
+
+    if has_pixwin:
+        if not nside:
+            raise ValueError("To correct for pixwin, "
+                             "you need to provide nside.")
+        bl = hp.pixwin(nside, lmax=lmax)
+        cls *= bl**2
+    return cls
+
+
+def get_catalog(npoints, m, seed, verbose=False):
     """
     Generates point catalog given a modulating mask m.
 
@@ -20,9 +117,9 @@ def get_catalog(npoints, m, seed):
     m = m / np.amax(m)  # new: normalize to [0,1]
     npix = len(m)
     npoints_get = int(npoints/np.mean(m))
-    if npoints_get > 1e7:
-        raise ValueError(f"Npints = {npoints_get}. "
-                         "Input power spectrum is not steep enough.")
+    if npoints_get > 1e7 and verbose:
+        print(f"WARNING: Npoints = {npoints_get}. "
+              "Consider decreasing nhope or steepening power spectrum slope.")
     phi = 2*np.pi*np.random.rand(npoints_get)
     th = np.arccos(-1+2*np.random.rand(npoints_get))
     ipix = hp.ang2pix(hp.npix2nside(npix), th, phi)
@@ -31,7 +128,7 @@ def get_catalog(npoints, m, seed):
     keep = u <= mv
     th = th[keep]
     phi = phi[keep]
-    return  np.array([th, phi], dtype=np.float64)
+    return np.array([th, phi], dtype=np.float64)
 
 
 def gen_random(nsrc, mask):
@@ -51,18 +148,22 @@ def gen_random(nsrc, mask):
     return positions, ipix[good]
 
 
-def gen_alms(cl, seed, spin=0):
+def gen_alms(cl, seed, spin=0, has_b=True, TB=False):
     """
     """
     if cl is None:
         return None
     np.random.seed(seed)
-    if spin == 0:
-        return hp.synalm(cl)
     alm1 = hp.synalm(cl)
-    np.random.seed(seed+12345)
+    if spin == 0:
+        return alm1
+    np.random.seed(seed+12345)  # TE nonzero but TB zero
     alm2 = hp.synalm(cl)
-    return np.array([alm1, alm2])
+    if not has_b:
+        alm2 *= 0.
+    if not TB:  # no TB correlation
+        return np.array([alm1, alm2])
+    return np.array([alm2, alm1])
 
 
 def gen_maps(cl, seed, nside, spin=0):
@@ -81,7 +182,7 @@ def alm2map(alm, nside):
     """
     """
     alm = np.array(alm)
-    if alm.ndim == 1 or alm.shape[0] == 1:
+    if np.atleast_2d(alm).shape[0] == 1:
         return hp.alm2map(alm, nside)
     elif alm.ndim == 2 and alm.shape[0] == 2:
         return hp.alm2map_spin(alm, nside, 2)
@@ -89,16 +190,18 @@ def alm2map(alm, nside):
         raise ValueError(f"alm has wrong input shapr ({alm.shape})")
 
 
-def gen_cl_guess(cl0, spin1=0, spin2=0):
+def gen_cl_guess(cl0, spin1=0, spin2=0, has_b=True):
     """
     """
     if (spin1, spin2) == (0, 0):
         return np.array([cl0])
     elif spin1 == 0 or spin2 == 0:
-        return np.array([cl0, cl0])
+        return np.array([cl0, 0*cl0])  # TE nonzero but TB zero
     else:
-        return np.array([cl0, 0*cl0, 0*cl0, cl0])
-    
+        if has_b:
+            return np.array([cl0, 0*cl0, 0*cl0, cl0])
+        return np.array([cl0, 0*cl0, 0*cl0, 0*cl0])
+
 
 def num_spin_comp(spin1, spin2):
     """
@@ -167,26 +270,141 @@ def _evaluate_product_cl(lmax, cls_cc, cls_bb, plot_dir, overwrite=True,
     return product_cl
 
 
-def get_momentum_cl(lmax, out_dir, pl_index=2, std_offset=5, pl_index_v=3,
+def check_gaussian(x, plot_fname=None):
+    """
+    Applies a series of Gaussianity checks to a given set of test values x
+    """
+    x = np.asarray(x)
+    x = x[np.isfinite(x)]
+
+    mu = np.mean(x)
+    sigma = np.std(x, ddof=1)
+
+    print(f"mean = {mu:.4g}")
+    print(f"std  = {sigma:.4g}")
+    print(f"skewness = {stats.skew(x):.4g}")
+    print(f"excess kurtosis = {stats.kurtosis(x):.4g}")
+
+    # Shapiro-Wilk is good for small-to-medium samples
+    if len(x) <= 5000:
+        _, p = stats.shapiro(x)
+        print(f"Shapiro-Wilk p-value = {p:.4g}")
+    else:
+        _, p = stats.normaltest(x)
+        print(f"D'Agostino-Pearson p-value = {p:.4g}")
+
+    # Q-Q plot
+    plt.figure()
+    stats.probplot(x, dist="norm", plot=plt)
+    plt.title("Normal Q-Q plot")
+    plt.savefig(plot_fname)
+    plt.close()
+
+
+def get_pte(chi2_in, chi2_dof=None, chi2_sims=None):
+    """
+    Given either a theoretical chi2 distribution or a set of simulated values,
+    compute the probability to exceed.
+    """
+    from scipy.stats import rv_histogram, chi2
+    if chi2_dof is not None:
+        return chi2.sf(chi2_in, chi2_dof)
+    if chi2_sims is not None:
+        counts, bin_edges = np.histogram(
+            chi2_sims,
+            bins=min(30, len(chi2_sims)//10), density=True)
+        histogram_dist = rv_histogram((counts, bin_edges))
+
+        return histogram_dist.sf(chi2_in)
+
+
+def uniformity_test(unif_samples, thresh=0.05):
+    """
+    Defines a passing criterion for a set of test samples. The test passes
+    if the KS test against uniformity in [0, 1) yields a p-value outside
+    (5%, 95%).
+    """
+    from scipy.stats import kstest
+    _, pval = kstest(unif_samples, "uniform", args=(0, 1))
+    return np.logical_and(pval > thresh, 1-thresh > pval), pval
+
+
+def smooth_broken_power_law(x, A=1.0, xb=1.0, alpha1=1.0, alpha2=2.0, s=1.0):
+    """
+    Smooth broken power law.
+
+    Parameters
+    ----------
+    x : array-like
+        Input values. Must be positive.
+    A : float
+        Normalization. The function equals A at x = xb.
+    xb : float
+        Break location.
+    alpha1 : float
+        Power-law slope for x << xb.
+    alpha2 : float
+        Power-law slope for x >> xb.
+    s : float
+        Smoothness parameter. Larger s gives a sharper break.
+
+    Returns
+    -------
+    y : array-like
+        Smooth broken power-law values.
+
+    Formula
+    -------
+    y = A * (x / xb)^(-alpha1) *
+        [0.5 * (1 + (x / xb)^(1/s))]^{(alpha1 - alpha2) * s}
+    """
+
+    x = np.asarray(x, dtype=float)
+
+    if np.any(x <= 0):
+        raise ValueError("x must be positive.")
+    if xb <= 0:
+        raise ValueError("xb must be positive.")
+    if s <= 0:
+        raise ValueError("s must be positive.")
+
+    xx = x / xb
+
+    return A * xx**(-alpha1) * (0.5 * (1.0 + xx**(1.0 / s)))**((alpha1 - alpha2) * s)  # noqa: E501
+
+
+def cl_turnover(ell):
+    """
+    CL fit to Alonso et al (2024), 2410.24134, Fig. 3
+    """
+    A = 0.94694
+    ell_b = 73.952
+    alpha1 = -0.1  # -0.85306
+    alpha2 = 0.1  # 1.42731
+    s = 0.59161
+
+    return smooth_broken_power_law(ell, A=A, xb=ell_b,
+                                   alpha1=alpha1, alpha2=alpha2, s=s)
+
+
+def get_momentum_cl(lmax, out_dir, pl_index=2, std_offset=2, pl_index_v=3,
                     is_clustering=False, overwrite=False, pixwin=None):
     """
     Returns overdensity CL, velocity CL, and momentum CL.
     Ensures that overdensity has a standard deviation of 1/std_offset.
     Computes momentum CL using the moments method.
     """
-    if pl_index <= 1:
-        raise ValueError("power law index for overdensity spetrum"
-                         "must be strictly greater than 1.")
-    ls = np.arange(lmax+1)
+    ls = np.arange(lmax+1)+0.01
+    # clg = cl_turnover(ls)
     clg = 1/(10+ls)**pl_index  # Gaussian spectrum (unnormalized)
     norm = 4*np.pi/std_offset**2/np.sum((2*ls+1)*clg)
-    # print('norm for overdensity cl', norm)
+    print('norm for overdensity cl', norm)
     # print("std (cl)", 1./std_offset)
     cl_od = norm*clg  # overdensity spectrum
     cl_od_pw = cl_od.copy()
     if pixwin is not None:
         cl_od_pw *= pixwin**2
-    if is_clustering:    
+    if is_clustering:
         return cl_od, cl_od, None, cl_od_pw, cl_od_pw
     cl_v = 1/(10+ls)**pl_index_v
     cl_th = cl_v + _evaluate_product_cl(lmax, cl_od, cl_v, out_dir,
@@ -280,20 +498,22 @@ def get_bins_from_lmax_log(lmax, n=20, lmin=2):
 
 
 def _get_catalog_field(positions, alm, lmax, spin=0, sigma=None, seed=None,
-                       lmax_mask=None):
+                       lmax_mask=None, fs=None, return_fs=False):
     """ Generates a NaMaster Catalog field from an alm,
     which we sample at the positions of the sources in cat.
     """
     if seed is not None:
         np.random.seed(seed)
-    if alm is None and sigma is None:
-        fs = None
-    elif alm is not None:
-        fs = nmt.utils._alm2catalog_ducc0(alm, positions,
-                                          spin=spin, lmax=lmax)
-        if sigma is not None:
-            fs += np.random.normal(np.zeros_like(fs),
-                                   np.full(fs.shape, sigma))
+    if alm is not None:
+        fs = nmt.utils._alm2catalog_ducc0(alm, positions, spin=spin, lmax=lmax)
+    elif fs is not None:
+        pass
+    else:
+        raise ValueError("Must provide either alm or fs")
+    if sigma is not None:
+        fs += np.random.normal(np.zeros_like(fs), np.full(fs.shape, sigma))
+    if return_fs:
+        return fs
     len = np.array(positions).shape[-1]
     f = nmt.NmtFieldCatalog(positions, np.ones(len), fs, lmax, spin=spin,
                             retain_catalog=True, lmax_mask=lmax_mask)
@@ -406,7 +626,7 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None, seed=None,
         elif flm.ndim == 2 and flm.shape[0] == 2:
             spin = 2
         else:
-            raise ValueError("field alms have wrong shape.") 
+            raise ValueError("field alms have wrong shape.")
         return _get_catalog_field(pos, flm, lmax, spin=spin, sigma=sigma,
                                   seed=seed, lmax_mask=lmax_mask)
     elif typ == "map":
@@ -436,13 +656,14 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None, seed=None,
             raise ValueError("Catalog must be provided.")
         if msk is None and ran is None:
             raise ValueError("Either mask or randoms must be provided")
-        pos, flm = cat
+        pos, flm, sigma = cat
         pos_rand = None
         if ran is not None:
             msk = None
             pos_rand = ran
         if typ == "num":
             flm = None
+            sigma = None
             spin = 0
         else:
             flm = np.array(flm)
@@ -451,7 +672,7 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None, seed=None,
             elif flm.ndim == 2 and flm.shape[0] == 2:
                 spin = 2
             else:
-                raise ValueError("field alms have wrong shape.") 
+                raise ValueError("field alms have wrong shape.")
         return _get_momentum_field(pos, lmax, valm=flm, mask=msk,
                                    positions_rand=pos_rand, spin=spin,
                                    sigma=sigma, seed=seed,
