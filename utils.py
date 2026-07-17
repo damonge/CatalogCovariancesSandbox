@@ -398,7 +398,7 @@ def get_momentum_cl(lmax, out_dir, pl_index=2, std_offset=2, pl_index_v=3,
     # clg = cl_turnover(ls)
     clg = 1/(10+ls)**pl_index  # Gaussian spectrum (unnormalized)
     norm = 4*np.pi/std_offset**2/np.sum((2*ls+1)*clg)
-    print('norm for overdensity cl', norm)
+    # print('norm for overdensity cl', norm)
     # print("std (cl)", 1./std_offset)
     cl_od = norm*clg  # overdensity spectrum
     cl_od_pw = cl_od.copy()
@@ -497,8 +497,9 @@ def get_bins_from_lmax_log(lmax, n=20, lmin=2):
     return nmt.NmtBin.from_edges(bin_mins, bin_maxs)
 
 
-def _get_catalog_field(positions, alm, lmax, spin=0, sigma=None, seed=None,
-                       lmax_mask=None, fs=None, return_fs=False):
+def _get_catalog_field(positions, alm, lmax, spin=0, mean=0., sigma=None,
+                       seed=None, lmax_mask=None, fs=None, return_fs=False,
+                       noise="gaussian", subtract_mean=True):
     """ Generates a NaMaster Catalog field from an alm,
     which we sample at the positions of the sources in cat.
     """
@@ -511,7 +512,18 @@ def _get_catalog_field(positions, alm, lmax, spin=0, sigma=None, seed=None,
     else:
         raise ValueError("Must provide either alm or fs")
     if sigma is not None:
-        fs += np.random.normal(np.zeros_like(fs), np.full(fs.shape, sigma))
+        if noise == "gaussian":
+            fs += np.random.normal(np.full(fs.shape, mean), np.full(fs.shape, sigma))
+        elif noise == "lognormal":
+            # Taken from 
+            s_sq = np.log(1.0 + sigma**2 / mean**2)
+            m = np.log(mean) - 0.5 * s_sq
+            ln_noise = np.random.lognormal(np.full(fs.shape, m),
+                                           np.full(fs.shape, np.sqrt(s_sq)))
+            fs += ln_noise
+    # Noise mean subtraction
+    if subtract_mean:
+        fs -= np.mean(fs)
     if return_fs:
         return fs
     len = np.array(positions).shape[-1]
@@ -543,8 +555,8 @@ def _get_map_field(mask, map, alm, lmax, spin=0, lmax_mask=None):
 
 
 def _get_momentum_field(positions, lmax, valm=None, mask=None,
-                        positions_rand=None, spin=0, sigma=None, seed=None,
-                        lmax_mask=None):
+                        positions_rand=None, spin=0, mean=0., sigma=0., seed=None,
+                        lmax_mask=None, noise="gaussian", subtract_mean=True):
     """ Generates a NaMaster Catalog Momentum field from a catalog and a mask
     or a random catalog. If valm is not provided, this makes a Catalog
     Clustering field.
@@ -567,8 +579,16 @@ def _get_momentum_field(positions, lmax, valm=None, mask=None,
         fs = nmt.utils._alm2catalog_ducc0(valm, positions,
                                           spin=spin, lmax=lmax)
         if sigma is not None:
-            fs += np.random.normal(np.zeros_like(fs),
-                                   np.full(fs.shape, sigma))
+            if noise == "gaussian":
+                fs += np.random.normal(np.full(fs.shape, mean),
+                                       np.full(fs.shape, sigma))
+            elif noise == "lognormal":
+                fs += np.random.lognormal(np.full(fs.shape, mean),
+                                          np.full(fs.shape, sigma))
+        # Noise mean subtraction
+        if subtract_mean:
+            fs -= np.mean(fs)
+
         f = nmt.NmtFieldCatalogMomentum(positions, weights, fs,
                                         positions_rand, weights_rand, lmax,
                                         mask=mask, spin=spin,
@@ -578,7 +598,7 @@ def _get_momentum_field(positions, lmax, valm=None, mask=None,
 
 
 def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None, seed=None,
-              lmax_mask=None):
+              lmax_mask=None, noise="gaussian", subtract_mean=True):
     """
     Parameters:
     lmax: int
@@ -591,13 +611,13 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None, seed=None,
         Field mask, either in healpix or CAR. Needs corresponding randoms to
         be None. Assumed to have spin 0 if shape is [...] and spin 2
         if shape is [2, ...]. Ignored unless type is "map"
-    cat: tuple of arrays (pos, flm, sigma)
+    cat: tuple of arrays (pos, flm, mean, sigma)
         Tuple containing arrays of source catalog positions, alms of the
         sampled field, and (optional) standard deviation of sampled field.
         flm are assumed to have spin 0 if ndim is 1 and spin 2
         if shape is [2, :]. Ignored if type is "map".
-        flm is ignored if field type is "num". sigma is ignored if None, or
-        if type is "map" or "num".
+        flm is ignored if field type is "num". mean and sigma are ignored if
+        None, or if type is "map" or "num".
     ran: array
         Array containing the random positions. Needs corresponding masks to be
         None. Ignored unless type is "num" or "mom".
@@ -609,7 +629,12 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None, seed=None,
         type is "map" or "num.
     lmax_mask: int
         lmax considered for mode coupling matrix calculations
-
+    noise: str
+        Statistics assumed for uncorrelated noise at each source position.
+        Accepted are "gaussiian", "lognormal". Defaults to "gaussian.
+    subtract_mean: bool
+        Whether to subtract the mean field value from all source values.
+        Default: True
     Returns:
     fld: NmtField
         Output namaster field, of type NmtField, NmtFieldCatalog,
@@ -619,7 +644,7 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None, seed=None,
     if typ == "cat":
         if cat == "None":
             raise ValueError("Catalog must be provided.")
-        pos, flm, sigma = cat
+        pos, flm, mean, sigma = cat
         flm = np.array(flm)
         if flm.ndim == 1 or (flm.ndim == 2 and flm.shape[0] == 1):
             spin = 0
@@ -627,8 +652,9 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None, seed=None,
             spin = 2
         else:
             raise ValueError("field alms have wrong shape.")
-        return _get_catalog_field(pos, flm, lmax, spin=spin, sigma=sigma,
-                                  seed=seed, lmax_mask=lmax_mask)
+        return _get_catalog_field(pos, flm, lmax, spin=spin, mean=mean,
+                                  sigma=sigma, seed=seed, lmax_mask=lmax_mask,
+                                  noise=noise, subtract_mean=subtract_mean)
     elif typ == "map":
         map = np.array(map)
         if map is None:
@@ -656,7 +682,7 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None, seed=None,
             raise ValueError("Catalog must be provided.")
         if msk is None and ran is None:
             raise ValueError("Either mask or randoms must be provided")
-        pos, flm, sigma = cat
+        pos, flm, mean, sigma = cat
         pos_rand = None
         if ran is not None:
             msk = None
@@ -664,6 +690,7 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None, seed=None,
         if typ == "num":
             flm = None
             sigma = None
+            mean = 0.
             spin = 0
         else:
             flm = np.array(flm)
@@ -675,8 +702,9 @@ def get_field(lmax, typ, cat=None, map=None, ran=None, msk=None, seed=None,
                 raise ValueError("field alms have wrong shape.")
         return _get_momentum_field(pos, lmax, valm=flm, mask=msk,
                                    positions_rand=pos_rand, spin=spin,
-                                   sigma=sigma, seed=seed,
-                                   lmax_mask=lmax_mask)
+                                   mean=mean, sigma=sigma, seed=seed,
+                                   lmax_mask=lmax_mask,
+                                   noise=noise, subtract_mean=subtract_mean)
     else:
         raise ValueError("Typ must be 'map', 'cat', 'mom', or 'num'")
 
@@ -690,3 +718,21 @@ def get_field_ids(types, spins, random_seeds):
     tsr_ids = [{v: k for k, v in enumerate(
         OrderedDict.fromkeys(tsr_list))}[tsr] for tsr in tsr_list]
     return tsr_ids
+
+
+def get_mean_number_density_multipole(Nsrc, binary_mask=None):
+    """
+    Computes the mean particle number per square arcmin and the multipole
+    corresponding to the mean innerparticle distance giben a binary mask.
+    If binary_mask is None, the full sky is assumed. binary_mask must other-
+    wise be a healpix map.
+    """
+    if binary_mask is None:
+        numdens_isr = Nsrc / np.pi / 4.
+    else:
+        area_mask_sr = 4*np.pi*np.mean(binary_mask)
+        numdens_isr = Nsrc / area_mask_sr
+    numdens_iarcmin = numdens_isr * (np.pi/180./60.)**2
+    ell_ipd = np.pi*np.sqrt(numdens_isr)
+
+    return numdens_iarcmin, ell_ipd
